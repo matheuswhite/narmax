@@ -1,0 +1,33 @@
+This file describes the data in the ballbeam.dat file.
+1. Contributed by:
+	Peter Van Overschee
+	K.U.Leuven - ESAT - SISTA
+	K. Mercierlaan 94
+	3001 Heverlee
+	Peter.Vanoverschee@esat.kuleuven.ac.be
+2. Process/Description:
+	Data of a the ball and beam practicum at ESAT-SISTA. 
+3. Sampling time 
+	0.1 sec.
+4. Number of samples: 
+	1000 samples
+5. Inputs:
+	a. angle of the beam
+6. Outputs:
+	a. position of the ball
+7. References:
+	a.  Van Overschee P., "Subspace identification : Theory, 
+	Implementation, Application" , Ph.D. Thesis, K.U.Leuven, February 
+	1995, pp. 200-206 
+8. Known properties/peculiarities
+	
+9. Some MATLAB-code to retrieve the data
+	!gunzip ballbeam.dat.Z
+	load ballbeam.dat
+	U=ballbeam(:,1);
+	Y=ballbeam(:,2);
+
+	
+	
+	
+	
