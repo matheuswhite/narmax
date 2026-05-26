@@ -310,6 +310,57 @@ O experimento 5 muda algumas conclusões intermediárias:
 
 5. **Princípio prático**: **mais lags não é universalmente melhor** — vale por dataset, e só validação out-of-sample distingue os casos. Critérios baseados em ERR de identificação subestimam o risco de overfitting.
 
+### Experimento 6 — lags grandes (`ny = nu = 8`, `d = 3`)
+
+Motivação: investigar se aumentar drasticamente os lags ajuda o W-H — talvez a memória do sistema seja longa o suficiente para que `ny, nu = 3` ainda não comporte sua estrutura. Espaço de candidatos cresce para **968 termos** (16 lineares + 136 quadráticos + 816 cúbicos), ~12× maior que o anterior. Tempo de execução: ~22s para os 4 datasets.
+
+#### Resultados — comparação direta com `(3, 3, 3)`
+
+| Dataset | `(3, 3, 3)` MPO | `(8, 8, 3)` MPO | Mudança |
+|---|---:|---:|---|
+| ballbeam     | 0.057648 | 0.070772 | **+23% pior** (overfitting) |
+| wienerhammer | 0.238815 | 0.238815 | **idêntico** |
+| snls80       | 0.009541 | 0.009812 | +3% (~igual) |
+| schroeder80  | 0.011324 | 0.020130 | **+78% pior** (overfitting) |
+
+#### A descoberta mais marcante — o W-H não muda
+
+Os números do Wiener-Hammerstein são **exatamente idênticos** entre as duas configurações: OSA = 0.005468, MPO = 0.238815. Mesmo com 8 lags disponíveis e 968 candidatos, o FROLS continua escolhendo *apenas* `y(k-1)` e `y(k-2)` com os mesmos coeficientes.
+
+Conclusão dura: **a estrutura W-H é, no espaço de candidatos polinomiais usado, fundamentalmente inacessível**. A não-linearidade estática (provavelmente íngreme — saturação ou deadzone) não é aproximável por polinômios cúbicos misturados com lags. E o bloco linear pós-NL "filtra" temporalmente a contribuição da NL, espalhando informação que polinômios diretos não recompõem.
+
+Resumindo o que sabemos sobre o W-H após 6 experimentos:
+- Mesmo modelo `y(k) ≈ 1.97 y(k-1) − 0.99 y(k-2)` é selecionado em todas as configurações tentadas (`(2,2,2)`, `(2,2,3)`, `(3,3,3)`, `(8,8,3)`).
+- O modelo explica 99.95% da variância em OSA mas tem ratio MPO/OSA de ~44×.
+- Aumentar grau ou lags não muda nada — o resíduo carrega estrutura *não-polinomial* que o FROLS não consegue capturar com esses candidatos.
+
+#### Schroeder e Ballbeam: overfitting confirmado
+
+Ambos pioram em free-run com `(8, 8, 3)`:
+
+- **Schroeder**: MPO sobe de 0.0113 → 0.0201 (+78%). OSA melhora marginalmente (0.0021 → 0.0016), sinal claro de que o modelo ajusta ruído local no treino.
+- **Ballbeam**: MPO sobe de 0.058 → 0.071 (+23%). Mesma dinâmica em escala menor.
+
+O `(3, 3, 3)` continua sendo o ponto sweet para ambos.
+
+#### Resumo dos pontos sweet por dataset
+
+| Dataset | Melhor configuração (até agora) | MPO RMSE |
+|---|---|---:|
+| ballbeam     | `(3, 3, 3)` | 0.058 |
+| wienerhammer | nenhuma resolve (estrutura inacessível) | 0.239 |
+| snls80       | `(2, 2, 2)` (leve vantagem) | 0.008 |
+| schroeder80  | `(3, 3, 3)` | 0.011 |
+
+### Conclusão geral dos 6 experimentos
+
+**Aumentar lags monotônicamente NÃO ajuda** — há um ponto sweet específico por dataset, e ultrapassá-lo introduz overfitting visível em free-run. ERR e ESR de identificação subestimam esse risco; validação out-of-sample é o que distingue um modelo robusto de um modelo que apenas decorou o treino.
+
+Para o W-H, o NARMAX polinomial puro é inadequado. Os caminhos viáveis para esse benchmark estão fora do escopo deste trabalho:
+1. **Identificação estruturada por blocos** (Best Linear Approximation + estimativa não-paramétrica da NL).
+2. **Polinômios de grau ≥ 4 ou 5** — caro computacionalmente e ainda assim limitado.
+3. **NARMAX com termos de ruído (MA)** — pode ajudar marginalmente se o resíduo for autocorrelacionado, mas não resolve o problema estrutural.
+
 ## Discussão — evolução de `d = 2` para `d = 3`
 
 ### Resumo comparativo
