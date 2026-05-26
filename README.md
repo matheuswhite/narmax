@@ -264,6 +264,52 @@ Mesmos 6 regressores, mesma estrutura — só o último termo trocou `y(k-2)²` 
 
 A mudança decisiva para o SNLS foi **aumentar os lags**, não o grau ou o `l_max`. O dataset precisa de memória mais profunda — a dinâmica do oscilador de Duffing nesse nível de excitação está distribuída em pelo menos 3 amostras passadas. Esse experimento valida que o pipeline FROLS é capaz de identificar modelos parcimoniosos *quando o espaço de candidatos contém a estrutura correta*.
 
+### Experimento 5 — Validação out-of-sample (OSA vs free-run)
+
+Até aqui, todas as métricas (ERR, ESR) foram medidas no mesmo dado de identificação. Esse experimento adiciona **validação out-of-sample**: split sequencial 70%/30% (treino/teste), identificação no treino e avaliação no teste com duas métricas:
+
+- **OSA** (*One-Step-Ahead*): predição do próximo `y(k)` usando o histórico **real** nos lags. Mede qualidade de predição de 1 passo.
+- **MPO** (*Model Predicted Output*, free-run): simulação de `y(k)` propagando-se com as **próprias predições** nos lags. Mede estabilidade e fidelidade do modelo como simulador.
+
+A ratio `MPO/OSA` indica a robustez: próximo de 1 significa que o modelo simula tão bem quanto prevê; valores altos indicam que erros se acumulam em free-run (e/ou estrutura incorreta).
+
+**Configuração comparada:** `(2, 2, 2)` vs `(3, 3, 3)` com `ρ = 0.001`, `l_max = 15`.
+
+| Dataset | Config | OSA RMSE | MPO RMSE | MPO/OSA |
+|---|---|---:|---:|---:|
+| ballbeam     | `(2, 2, 2)` | 0.001999 | 0.117202 | 58.6× |
+| ballbeam     | `(3, 3, 3)` | 0.001724 | **0.057648** | **33.4×** |
+| wienerhammer | `(2, 2, 2)` | 0.005468 | 0.238815 | 43.7× |
+| wienerhammer | `(3, 3, 3)` | 0.005468 | 0.238815 | 43.7× |
+| snls80       | `(2, 2, 2)` | 0.001780 | **0.008365** | **4.7×** |
+| snls80       | `(3, 3, 3)` | 0.000888 | 0.009541 | 10.7× |
+| schroeder80  | `(2, 2, 2)` | 0.002381 | 0.022015 | 9.2× |
+| schroeder80  | `(3, 3, 3)` | 0.002052 | **0.011324** | **5.5×** |
+
+### Observações por dataset
+
+**Ballbeam**: o `(3, 3, 3)` é **claramente melhor em free-run** (MPO 0.058 vs 0.117) apesar de selecionar só 2 regressores contra 4 do `(2, 2, 2)`. **Refuta a hipótese intuitiva** de que mais regressores = melhor simulação. O termo `y(k-3)` parece carregar informação que substitui efetivamente o trio `y(k-2) + u(k-1) + u(k-2)`, gerando um modelo mais parcimonioso e melhor para extrapolação.
+
+**Wiener-Hammerstein**: **resultado idêntico** nas duas configurações. O modelo identificado é o mesmo (`y(k-1) + y(k-2)`, com mesmos coeficientes) — confirma de uma vez por todas que aumentar lags ou grau não ajuda. A não-linearidade estática do W-H não é capturável por NARMAX polinomial padrão neste conjunto de candidatos, e nem mesmo `ny = nu = 3` muda isso.
+
+**Silverbox SNLS**: surpresa — o `(2, 2, 2)` tem **MPO ligeiramente melhor** (0.008365 vs 0.009541), apesar do `(3, 3, 3)` ter ESR menor no treino. Isso é um sinal clássico de que **o `(3, 3, 3)` está começando a overfittar** no SNLS: ele adiciona estrutura que ajuda em OSA (0.000888 vs 0.001780, 2× melhor) mas não generaliza tão bem para free-run. A ratio `MPO/OSA` de 10.7× do `(3, 3, 3)` vs 4.7× do `(2, 2, 2)` confirma essa interpretação. **Para SNLS, o modelo de 10 termos com `(2, 2, 2)` é estruturalmente mais robusto.**
+
+**Silverbox Schroeder**: o `(3, 3, 3)` é claramente melhor (MPO 0.011 vs 0.022, **2× menos erro**), e com menos regressores (6 vs 10). Aqui o ganho do lag adicional é real e generaliza — confirma a observação do experimento 4. O termo `y(k-3)²` que apareceu no `(3, 3, 3)` traz informação que o `(2, 2, 2)` precisava distribuir entre múltiplos quadráticos.
+
+### Conclusão da validação
+
+O experimento 5 muda algumas conclusões intermediárias:
+
+1. **Sobre o Ballbeam**: o `(3, 3, 3)` não é "pior" como a hipótese inicial (baseada em parcimônia de ERR) sugeria — é **melhor** em free-run. A parcimônia de 2 regressores ajudou, não atrapalhou.
+
+2. **Sobre o SNLS**: aquela "vitória" do experimento 4 (15 → 8 regressores parando por ρ) precisa ser qualificada — em validação out-of-sample, o modelo `(3, 3, 3)` overfitta levemente. O `(2, 2, 2)` esgota `l_max`, mas seu modelo de 10 termos simula melhor. **Os números do ERR de identificação podem mentir sobre generalização**.
+
+3. **Sobre o Schroeder**: a vitória do `(3, 3, 3)` é confirmada — gap MPO/OSA cai pela metade.
+
+4. **Sobre o W-H**: nenhuma das configurações testadas funciona bem em free-run (gap ~44×). Modelagem específica ainda é necessária.
+
+5. **Princípio prático**: **mais lags não é universalmente melhor** — vale por dataset, e só validação out-of-sample distingue os casos. Critérios baseados em ERR de identificação subestimam o risco de overfitting.
+
 ## Discussão — evolução de `d = 2` para `d = 3`
 
 ### Resumo comparativo

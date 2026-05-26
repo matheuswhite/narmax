@@ -1,10 +1,15 @@
+mod narmax_method;
+mod narmax_model;
 mod regressor;
 mod symbol;
 
-use nalgebra::{DMatrix, DVector};
 use regressor::Regressor;
 use std::collections::HashMap;
 use std::fs;
+
+use crate::narmax_method::NarmaxMethod;
+use crate::narmax_method::frols::Frols;
+use crate::narmax_model::NarmaxModel;
 
 fn main() {
     let regs = build_regressors(3, 3, 3);
@@ -28,15 +33,20 @@ fn main() {
         let (u, y) = load_csv(path);
         println!("Carregadas {} amostras", y.len());
 
-        let model = regs.clone().identify(Frols::new(0.001, 15), &y, &u);
+        let ((u_tr, y_tr), (u_te, y_te)) = split_train_test(&u, &y, 0.3);
 
-        println!("Selecionados ({} regressores):", model.regressors.len());
-        for (i, r) in model.regressors.iter().enumerate() {
-            let theta = model.theta[i];
-            let err = model.err.as_ref().map(|v| v[i]).unwrap_or(0.0);
-            println!("  θ[{}] = {:>+12.6}  ERR = {:.6}   {}", i, theta, err, r);
-        }
-        println!();
+        let model = regs.clone().identify(Frols::new(0.001, 15), &y_tr, &u_tr);
+
+        let y_hat_osa = predict_osa(&model, &y_te, &u_te);
+        let k_min = max_lag(&model.regressors);
+        let rmse_osa = rmse(&y_te[k_min..], &y_hat_osa);
+
+        let y_hat_mpo = simulate_free_run(&model, &y_te, &u_te);
+        let rmse_mpo = rmse(&y_te[k_min..], &y_hat_mpo[k_min..]);
+
+        println!("OSA RMSE: {:.6}", rmse_osa);
+        println!("MPO RMSE: {:.6}", rmse_mpo);
+        println!("gap MPO/OSA: {:.2}×\n", rmse_mpo / rmse_osa);
     }
 }
 
@@ -51,6 +61,23 @@ fn load_csv(path: &str) -> (Vec<f32>, Vec<f32>) {
         y.push(cols.next().unwrap().parse::<f32>().unwrap());
     }
     (u, y)
+}
+
+fn split_train_test(
+    u: &[f32],
+    y: &[f32],
+    test_ratio: f32,
+) -> ((Vec<f32>, Vec<f32>), (Vec<f32>, Vec<f32>)) {
+    let total = y.len();
+    let test_size = (total as f32 * test_ratio).round() as usize;
+    let train_size = total - test_size;
+
+    let u_train = u[..train_size].to_vec();
+    let y_train = y[..train_size].to_vec();
+    let u_test = u[train_size..].to_vec();
+    let y_test = y[train_size..].to_vec();
+
+    ((u_train, y_train), (u_test, y_test))
 }
 
 fn build_regressors(y_len: usize, u_len: usize, non_lin_len: usize) -> Vec<Regressor> {
@@ -84,13 +111,55 @@ fn build_regressors(y_len: usize, u_len: usize, non_lin_len: usize) -> Vec<Regre
     all_terms
 }
 
-#[derive(Debug)]
-struct NarmaxModel {
-    regressors: Vec<Regressor>,
-    theta: Vec<f32>,
-    phi: Option<DMatrix<f32>>,
-    err: Option<Vec<f32>>,
-    selected_indices: Option<Vec<usize>>,
+fn predict_osa(model: &NarmaxModel, y: &[f32], u: &[f32]) -> Vec<f32> {
+    let k_min = max_lag(&model.regressors);
+    let samples = HashMap::from([("y", y), ("u", u)]);
+    (k_min..y.len())
+        .map(|k| {
+            model
+                .regressors
+                .iter()
+                .zip(&model.theta)
+                .map(|(r, &t)| t * r.eval_at(k, &samples).unwrap())
+                .sum()
+        })
+        .collect()
+}
+
+fn max_lag(regs: &[Regressor]) -> usize {
+    regs.iter()
+        .flat_map(|r| r.terms().iter().map(|s| s.index()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn simulate_free_run(model: &NarmaxModel, y_init: &[f32], u: &[f32]) -> Vec<f32> {
+    let k_min = max_lag(&model.regressors);
+    let mut y_hat = y_init[..k_min].to_vec();
+
+    for k in k_min..u.len() {
+        let samples = HashMap::from([("y", y_hat.as_slice()), ("u", u)]);
+        let pred = model
+            .regressors
+            .iter()
+            .zip(&model.theta)
+            .map(|(r, &t)| t * r.eval_at(k, &samples).unwrap())
+            .sum();
+
+        y_hat.push(pred);
+    }
+
+    y_hat
+}
+
+fn rmse(y_true: &[f32], y_pred: &[f32]) -> f32 {
+    let n = y_true.len() as f32;
+    let sum_sq: f32 = y_true
+        .iter()
+        .zip(y_pred)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum();
+    (sum_sq / n).sqrt()
 }
 
 trait NarmaxIdentify<M>
@@ -106,165 +175,5 @@ where
 {
     fn identify(self, method: M, y: &[f32], u: &[f32]) -> NarmaxModel {
         method.identify(self, y, u)
-    }
-}
-
-trait NarmaxMethod {
-    fn identify(self, regressors: Vec<Regressor>, y: &[f32], u: &[f32]) -> NarmaxModel;
-}
-
-#[derive(Clone, Copy)]
-struct Frols {
-    rho: f32,
-    l_max: usize,
-}
-
-impl Frols {
-    fn new(rho: f32, l_max: usize) -> Self {
-        Self { rho, l_max }
-    }
-
-    fn build_initial_phi(regressors: &[Regressor], y: &[f32], u: &[f32]) -> DMatrix<f32> {
-        let mut k_min = 0;
-        for r in regressors {
-            for s in r.terms() {
-                if s.index() > k_min {
-                    k_min = s.index();
-                }
-            }
-        }
-
-        let samples = HashMap::from([("y", y), ("u", u)]);
-
-        let n = y.len() - k_min;
-        let m = regressors.len();
-
-        DMatrix::from_fn(n, m, |i, j| {
-            regressors[j].eval_at(k_min + i, &samples).unwrap()
-        })
-    }
-}
-
-impl NarmaxMethod for Frols {
-    fn identify(self, regressors: Vec<Regressor>, y: &[f32], u: &[f32]) -> NarmaxModel {
-        /* Setup */
-        let phi = Self::build_initial_phi(&regressors, y, u);
-        let m = phi.ncols();
-        let n = phi.nrows();
-        let k_min = y.len() - n;
-        let y = DVector::from_fn(n, |i, _| y[k_min + i]);
-        let sigma2 = (y.transpose() * &y)[(0, 0)];
-        let l_max = self.l_max.min(m);
-
-        /* Build Matrix and Vectors */
-        let mut w = DMatrix::zeros(n, l_max);
-        let mut norms2 = DVector::zeros(l_max);
-        let mut g = DVector::zeros(l_max);
-        let mut err = DVector::zeros(l_max);
-        let mut a = DMatrix::zeros(l_max, l_max);
-        let mut selected = Vec::with_capacity(l_max);
-        let mut remaining = (0..m).collect::<Vec<_>>();
-        let mut current_l = 0_usize;
-
-        'main_loop: for _ in 0..l_max {
-            let w_view = w.columns(0, current_l);
-            let norms2_view = norms2.rows(0, current_l);
-
-            let mut best_j = None;
-            let mut best_err = f32::NEG_INFINITY;
-            let mut best_w_cand = None;
-            let mut best_g = 0.0;
-            let mut best_w_norm2 = 0.0;
-            let mut best_alpha = None;
-
-            'inner_loop: for &j in &remaining {
-                let phi_j = phi.column(j);
-
-                let (w_cand, alpha) = if current_l == 0 {
-                    let alpha = None;
-                    let w_cand = phi_j.clone_owned();
-
-                    (w_cand, alpha)
-                } else {
-                    let proj = w_view.tr_mul(&phi_j);
-                    let alpha = proj.component_div(&norms2_view);
-                    let w_cand = &phi_j - &(&w_view * &alpha);
-
-                    (w_cand, Some(alpha))
-                };
-
-                let w_norm2 = w_cand.norm_squared();
-                if w_norm2 < 1e-8 {
-                    continue 'inner_loop;
-                }
-
-                let g_cand = w_cand.dot(&y) / w_norm2;
-                let err_cand = g_cand * g_cand * w_norm2 / sigma2;
-
-                if err_cand > best_err {
-                    best_err = err_cand;
-                    best_j = Some(j);
-                    best_w_cand = Some(w_cand);
-                    best_g = g_cand;
-                    best_w_norm2 = w_norm2;
-                    best_alpha = alpha;
-                }
-            }
-
-            if best_j.is_none() {
-                break 'main_loop;
-            }
-
-            /* COMMIT */
-            w.set_column(current_l, &best_w_cand.unwrap());
-            norms2[current_l] = best_w_norm2;
-            g[current_l] = best_g;
-            err[current_l] = best_err;
-
-            if let Some(b_alpha) = best_alpha.as_ref() {
-                for i in 0..current_l {
-                    a[(i, current_l)] = b_alpha[i];
-                }
-            }
-            a[(current_l, current_l)] = 1.0;
-
-            selected.push(best_j.unwrap());
-            remaining.retain(|&idx| idx != best_j.unwrap());
-            current_l += 1;
-
-            /* STOP */
-            let esr = 1.0 - err.rows(0, current_l).sum();
-            if esr < self.rho {
-                break 'main_loop;
-            }
-
-            if remaining.is_empty() {
-                break 'main_loop;
-            }
-        }
-
-        /* Recover Theta from original space */
-        let mut theta = DVector::zeros(current_l);
-        for i in (0..current_l).rev() {
-            let mut sum = 0.0;
-            for k in (i + 1)..current_l {
-                sum += a[(i, k)] * theta[k];
-            }
-            theta[i] = g[i] - sum;
-        }
-
-        /* Build and return model */
-        let mut selected_regressors = vec![];
-        for &idx in &selected {
-            selected_regressors.push(regressors[idx].clone());
-        }
-
-        NarmaxModel {
-            regressors: selected_regressors,
-            theta: theta.iter().copied().collect(),
-            phi: Some(phi),
-            err: Some(err.rows(0, current_l).iter().cloned().collect()),
-            selected_indices: Some(selected),
-        }
     }
 }
