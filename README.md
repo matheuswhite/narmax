@@ -361,6 +361,86 @@ Para o W-H, o NARMAX polinomial puro é inadequado. Os caminhos viáveis para es
 2. **Polinômios de grau ≥ 4 ou 5** — caro computacionalmente e ainda assim limitado.
 3. **NARMAX com termos de ruído (MA)** — pode ajudar marginalmente se o resíduo for autocorrelacionado, mas não resolve o problema estrutural.
 
+### Experimento 7 — Implementação dos termos MA (NARMAX completo)
+
+Até aqui o modelo era NARX (sem o "M" do nome). Esse experimento implementa o esquema iterativo **ELS-FROLS** (*Extended Least Squares*) para identificar termos MA — produtos envolvendo `e(k-i)`, o resíduo da própria predição.
+
+#### Mudanças estruturais
+
+- `build_regressors(atoms, d)` passou a aceitar átomos arbitrários via `HashMap<&str, usize>` — pode incluir `("e", ne)` além de `y` e `u`.
+- `Frols` ganhou um método `identify_with_error(regressors, y, u, e)` que monta a Φ inicial com `"e"` no `HashMap` de samples. O algoritmo interno do FROLS **não muda**.
+- `compute_residual(model, y, u)` calcula resíduos OSA recursivamente: a cada `k`, lê `e[k-i]` já preenchido e escreve `e[k] = y[k] − ŷ(k)`.
+- Loop externo de até 10 iterações: identifica → calcula resíduo → re-identifica com novos candidatos `e(k-i)`. Para quando o conjunto de regressores selecionados se estabiliza e `|Δθ| < 1e-3`.
+
+Configuração testada: `ny = nu = ne = 2`, `d = 3`, `ρ = 0.001`, `l_max = 15`.
+
+#### Três bugs descobertos no processo
+
+Adicionar `"e"` ao alfabeto de átomos exigiu revisar **todos** os pontos do código que constroem o `HashMap` de samples. Três bugs do mesmo tipo apareceram:
+
+1. **`compute_residual`** — não incluía `"e"` no `HashMap`. Quando um modelo NARMAX selecionava algum termo `e(k-i)`, na iteração externa seguinte o `eval_at` retornava `None` → panic.
+2. **`predict_osa`** — bug latente análogo. Disparava se um modelo NARMAX final fosse usado para predição em teste.
+3. **`simulate_free_run`** — mesmo padrão. Convenção aplicada: `e ≡ 0` no horizonte de simulação (não temos acesso a `y` real para calcular resíduos).
+
+Lição: incluir um novo átomo é uma mudança de **alfabeto**, não só de dados. Todo *call site* que monta `samples` precisa ser revisitado. Em Rust, o sistema de tipos não pega isso — `HashMap::get` aceita qualquer chave em runtime.
+
+#### Bug crítico — `Hash` inconsistente com `PartialEq` em `Regressor`
+
+O `Regressor` derivava `Hash` (ordem-sensitive no `Vec<Symbol>`) mas implementava `PartialEq` ordem-insensitive. Isso viola o contrato `a == b ⇒ hash(a) == hash(b)`.
+
+O `converged()` na malha externa do ELS usa `HashSet<Regressor>` para comparar conjuntos de regressores entre iterações. Com hashes inconsistentes, dois Regressors matematicamente iguais podiam cair em buckets diferentes do hash set, fazendo `set_new != set_old` retornar `true` mesmo quando os conjuntos eram idênticos. **Resultado**: a convergência raramente era detectada, o loop rodava as 10 iterações e o modelo final era um snapshot aleatório do meio do ciclo iterativo — frequentemente com termos MA mal-condicionados.
+
+**Correção**: canonicalizar a ordem interna dos `Symbol`s.
+
+```rust
+// symbol.rs
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Symbol { /* name, index, power */ }
+
+// regressor.rs
+impl From<Vec<Symbol>> for Regressor {
+    fn from(mut terms: Vec<Symbol>) -> Self {
+        terms.sort();   // ← forma canônica: ordena por (name, index, power)
+        Self { terms }
+    }
+}
+```
+
+Com isso, dois `Regressor`s representando o mesmo produto matemático têm `Vec<Symbol>` byte-a-byte idêntico → mesmo `Hash` derivado → contrato preservado.
+
+#### Resultados finais
+
+| Dataset | NARX MPO | NARMAX MPO (antes do fix Hash) | NARMAX MPO (após fix Hash) |
+|---|---:|---:|---:|
+| ballbeam     | 0.117 | **2.74** (catastrófico) | **0.052** |
+| wienerhammer | 0.239 | 0.239                   | 0.239 |
+| snls80       | 0.0072| 0.0094                  | 0.0094 |
+| schroeder80  | 0.0118| 0.0118                  | 0.0118 |
+
+**Ballbeam — a virada**: com o `converged()` agora detectando convergência corretamente, o NARMAX se estabiliza no ponto fixo do ELS (3 regressores, coeficientes bem-condicionados). MPO cai de **0.117 (NARX puro) para 0.052 — uma melhora de 56%**. É a primeira vez no projeto que a MA agrega valor mensurável em validação out-of-sample.
+
+**W-H, SNLS, Schroeder — não mudam**: o fix do Hash não afetou esses datasets porque:
+- W-H e Schroeder: FROLS não selecionou nenhum termo `e(k-i)` → modelo NARMAX ≡ NARX → convergência trivial na 1ª iteração → bug do Hash não disparava.
+- SNLS: a oscilação dos termos MA entre iterações era pequena → snapshot ruim não era muito ruim → bug parcialmente mascarado.
+
+#### Conclusão da MA
+
+1. **A teoria se confirma quando o pipeline está correto**: a MA pode melhorar simulação em casos onde o resíduo NARX tem estrutura. O ballbeam é exatamente esse caso.
+2. **Bugs latentes em traits derivadas são particularmente perigosos**. O `Hash` inconsistente não dava warning, não dava panic — apenas degradava silenciosamente os resultados. Só foi diagnosticado pelo número anômalo (MPO 2.74).
+3. **Generalizar `build_regressors` para átomos arbitrários** foi o passo arquitetural certo. O fato de o `HashMap<&str, usize>` permitir misturar livremente `y, u, e` (e potencialmente outros átomos, como entradas exógenas adicionais) mantém o código aberto a extensões.
+4. **Para os outros datasets, a MA não ajudou em MPO**. Confirma o que a literatura sugere: termos MA são úteis quando o resíduo do NARX é *colorido* (autocorrelacionado); quando já é branco, a MA não tem o que capturar. W-H e Schroeder estão nessa segunda categoria.
+
+#### Atualização do quadro de pontos sweet
+
+| Dataset | Configuração | Modelo | MPO |
+|---|---|---|---:|
+| ballbeam     | NARMAX `(2, 2, 3)` com `ne = 2` | 3 regressores (NARX + MA) | **0.052** |
+| wienerhammer | NARX `(3, 3, 3)` (todas equivalentes) | 2 lineares                | 0.239 |
+| snls80       | NARX `(2, 2, 2)` (leve vantagem)   | 10 termos                  | 0.008 |
+| schroeder80  | NARX `(3, 3, 3)`                   | 6 regressores              | 0.011 |
+
+A MA só justificou seu custo computacional no ballbeam. Para os Silverbox, o NARX puro continua melhor. Para o W-H, nada do que tentamos (lags, grau, MA) o tornou tratável pelo NARMAX polinomial padrão.
+
 ## Discussão — evolução de `d = 2` para `d = 3`
 
 ### Resumo comparativo

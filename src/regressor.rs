@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display, ops::Mul};
 
 use crate::symbol::Symbol;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub struct Regressor {
     terms: Vec<Symbol>,
 }
@@ -55,7 +55,8 @@ impl Regressor {
 }
 
 impl From<Vec<Symbol>> for Regressor {
-    fn from(terms: Vec<Symbol>) -> Self {
+    fn from(mut terms: Vec<Symbol>) -> Self {
+        terms.sort();
         Self { terms }
     }
 }
@@ -128,6 +129,22 @@ mod tests {
     use super::*;
     use crate::build_regressors;
 
+    fn assert_same_regressor_set(left: &[Regressor], right: &[Regressor]) {
+        assert_eq!(
+            left.len(),
+            right.len(),
+            "len mismatch: {} vs {}",
+            left.len(),
+            right.len()
+        );
+        for r in left {
+            assert!(right.contains(r), "missing in right: {}", r);
+        }
+        for r in right {
+            assert!(left.contains(r), "missing in left: {}", r);
+        }
+    }
+
     #[test]
     fn test_regressor_display() {
         let symbol = Regressor::new("x", 0);
@@ -162,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_222() {
-        let output = build_regressors(2, 2, 2);
+        let output = build_regressors(HashMap::from([("y", 2), ("u", 2)]), 2);
         let a = Regressor::new("y", 1);
         let b = Regressor::new("y", 2);
         let c = Regressor::new("u", 1);
@@ -185,7 +202,7 @@ mod tests {
             &d * &d,
         ];
 
-        assert_eq!(output, expected);
+        assert_same_regressor_set(&output, &expected);
     }
 
     #[test]
@@ -276,19 +293,28 @@ mod tests {
 
     #[test]
     fn build_regressors_222_has_fourteen_terms() {
-        assert_eq!(build_regressors(2, 2, 2).len(), 14);
+        assert_eq!(
+            build_regressors(HashMap::from([("y", 2), ("u", 2)]), 2).len(),
+            14
+        );
     }
 
     #[test]
     fn build_regressors_223_has_thirtyfour_terms() {
-        assert_eq!(build_regressors(2, 2, 3).len(), 34);
+        assert_eq!(
+            build_regressors(HashMap::from([("y", 2), ("u", 2)]), 3).len(),
+            34
+        );
     }
 
     #[test]
     fn build_regressors_each_term_has_total_power_at_most_n() {
-        for r in build_regressors(2, 2, 3) {
+        for r in build_regressors(HashMap::from([("y", 2), ("u", 2)]), 3) {
             let total: usize = r.terms().iter().map(|s| s.power()).sum();
-            assert!((1..=3).contains(&total), "total power {total} out of [1, 3]");
+            assert!(
+                (1..=3).contains(&total),
+                "total power {total} out of [1, 3]"
+            );
         }
     }
 
@@ -386,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_223() {
-        let output = build_regressors(2, 2, 3);
+        let output = build_regressors(HashMap::from([("y", 2), ("u", 2)]), 3);
         let a = Regressor::new("y", 1);
         let b = Regressor::new("y", 2);
         let c = Regressor::new("u", 1);
@@ -429,6 +455,6 @@ mod tests {
             &d * &d * d.clone(),
         ];
 
-        assert_eq!(output, expected);
+        assert_same_regressor_set(&output, &expected);
     }
 }

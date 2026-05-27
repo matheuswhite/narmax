@@ -32,12 +32,39 @@ impl Frols {
             regressors[j].eval_at(k_min + i, &samples).unwrap()
         })
     }
-}
 
-impl NarmaxMethod for Frols {
-    fn identify(self, regressors: Vec<Regressor>, y: &[f32], u: &[f32]) -> NarmaxModel {
+    fn build_initial_phi_with_error(
+        regressors: &[Regressor],
+        y: &[f32],
+        u: &[f32],
+        e: &[f32],
+    ) -> DMatrix<f32> {
+        let mut k_min = 0;
+        for r in regressors {
+            for s in r.terms() {
+                if s.index() > k_min {
+                    k_min = s.index();
+                }
+            }
+        }
+
+        let samples = HashMap::from([("y", y), ("u", u), ("e", e)]);
+
+        let n = y.len() - k_min;
+        let m = regressors.len();
+
+        DMatrix::from_fn(n, m, |i, j| {
+            regressors[j].eval_at(k_min + i, &samples).unwrap()
+        })
+    }
+
+    fn core_identify(
+        &self,
+        regressors: Vec<Regressor>,
+        y: &[f32],
+        phi: DMatrix<f32>,
+    ) -> NarmaxModel {
         /* Setup */
-        let phi = Self::build_initial_phi(&regressors, y, u);
         let m = phi.ncols();
         let n = phi.nrows();
         let k_min = y.len() - n;
@@ -155,5 +182,23 @@ impl NarmaxMethod for Frols {
             err: Some(err.rows(0, current_l).iter().cloned().collect()),
             selected_indices: Some(selected),
         }
+    }
+}
+
+impl NarmaxMethod for Frols {
+    fn identify(self, regressors: Vec<Regressor>, y: &[f32], u: &[f32]) -> NarmaxModel {
+        let phi = Self::build_initial_phi(&regressors, y, u);
+        self.core_identify(regressors, y, phi)
+    }
+
+    fn identify_with_error(
+        self,
+        regressors: Vec<Regressor>,
+        y: &[f32],
+        u: &[f32],
+        e: &[f32],
+    ) -> NarmaxModel {
+        let phi = Self::build_initial_phi_with_error(&regressors, y, u, e);
+        self.core_identify(regressors, y, phi)
     }
 }
