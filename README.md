@@ -8,9 +8,19 @@ Trabalho da disciplina de Identificação de Sistemas (Mestrado).
 
 ```
 src/
-├── symbol.rs       Symbol { name, index, power } — átomo de um termo
-├── regressor.rs    Regressor (produto de Symbols), Mul, eval, eval_at
-└── main.rs         build_regressors + FROLS + carregamento dos datasets
+├── lib.rs                  expõe a biblioteca compartilhada pelos dois binários
+├── symbol.rs               Symbol { name, index, power } — átomo de um termo
+├── regressor.rs            Regressor (produto de Symbols), Mul, eval_at + build_regressors
+├── narmax_model.rs         NarmaxModel + predict_osa / simulate_free_run / rmse, mse
+├── narmax_method/
+│   ├── mod.rs              trait NarmaxMethod
+│   ├── common.rs           Φ inicial + recuperação de θ (compartilhado FROLS/MGS)
+│   ├── frols.rs            FROLS (Gram-Schmidt clássico)
+│   ├── mgs.rs              MGS (Gram-Schmidt modificado, deflação in-place)
+│   └── semp.rs             SEMP (seleção por erro de simulação + poda; θ via LS)
+├── refine.rs               refino de θ por erro de simulação (Nelder-Mead)
+├── main.rs                 binário `narmax`: compara FROLS/MGS/SEMP (NARX)
+└── bin/notebook.rs         binário `notebook`: réplica fiel do notebook Python (L-BFGS)
 
 res/
 ├── ballbeam.csv         1000  amostras  (idx, u, y)
@@ -476,18 +486,92 @@ O experimento valida o pipeline FROLS:
 2. **Em sistemas com não-linearidade real (Silverbox)**, aumentar `non_lin_len` permite o algoritmo escolher termos que refletem a estrutura física, e em alguns casos (Schroeder) **reduz** o número de parâmetros necessários — parcimônia confirmada.
 3. Os modelos identificados são consistentes entre experimentos diferentes na mesma planta (SNLS vs Schroeder convergem para estruturas similares com coeficientes próximos).
 
+### Experimento 8 — MGS e SEMP ao lado do FROLS (foco em seleção, NARX-only)
+
+Esse experimento adiciona **dois algoritmos de seleção** ao lado do FROLS e os compara diretamente. Para isolar a comparação dos métodos de seleção de estrutura, a malha iterativa de termos MA (Experimento 7) foi **removida** — o pipeline padrão (`main.rs`) voltou a ser **NARX puro**. (A MA só agregara valor mensurável no ballbeam; nos demais datasets era neutra, então não obscurece a comparação.)
+
+**MGS (*Modified Gram-Schmidt*).** Mesmo critério de seleção (ERR) e mesmos critérios de parada do FROLS, mas trocando a ortogonalização. O FROLS original re-projeta a coluna **original** `φ_j` contra todo o bloco já selecionado a cada passo (Gram-Schmidt *clássico*); o MGS **deflaciona a matriz de candidatos in-place**: ao fixar `w_s`, subtrai sua projeção de todas as colunas restantes, que no passo seguinte já chegam ortogonais. Em aritmética exata produz o **mesmo modelo**; em `f32` é numericamente mais estável e mais barato (uma projeção por candidato, em vez de `l`). A matriz triangular `A` (necessária para recuperar `θ`) é reconstruída acumulando os coeficientes de deflação por candidato. Um teste (`mgs_equivalent_to_frols`) garante a equivalência num sistema sintético.
+
+**SEMP (*Simulation Error Minimization with Pruning*) — versão própria.** Diferente do FROLS, a decisão de aceite usa o **erro de simulação livre (MSSE)**, não o erro de 1 passo. O ERR serve só para ordenar quais candidatos testar; aceita-se o primeiro que reduz o MSSE (free-run no treino, via `simulate_free_run`), e após cada aceite há um passo de **poda** que remove termos cuja remoção não piora o MSSE. `θ` é estimado por mínimos quadrados fechado a cada teste. Parâmetros: `max_terms=15`, `tol=1e-3`, `top_k=5`.
+
+Configuração: `ny = nu = 2`, `d = 3` (34 candidatos), `ρ = 0.001`, `l_max = 15`. Validação out-of-sample 70/30.
+
+| Dataset | Método | nº reg | OSA RMSE | MPO RMSE | gap MPO/OSA |
+|---|---|---:|---:|---:|---:|
+| ballbeam | FROLS | 4 | 0.001999 | 0.117202 | 58.6× |
+| | MGS | 4 | 0.001999 | 0.117193 | 58.6× |
+| | SEMP | 1 | 0.003675 | 0.203435 | 55.4× |
+| wienerhammer | FROLS | 2 | 0.005468 | 0.238815 | 43.7× |
+| | MGS | 2 | 0.005468 | 0.238815 | 43.7× |
+| | SEMP | 2 | 0.005468 | 0.238815 | 43.7× |
+| snls80 | FROLS | 15 | 0.001644 | 0.007211 | 4.4× |
+| | MGS | 15 | 0.001644 | 0.007211 | 4.4× |
+| | **SEMP** | 2 | 0.040795 | 0.049415 | **1.2×** |
+| schroeder80 | FROLS | 6 | 0.002067 | 0.011789 | 5.7× |
+| | MGS | 6 | 0.002067 | 0.011789 | 5.7× |
+| | SEMP | 2 | 0.011188 | 0.062176 | 5.6× |
+
+Observações:
+
+- **MGS ≡ FROLS empiricamente**: seleção e métricas idênticas em todos os datasets; só há diferença no 5º–6º decimal (ballbeam), exatamente o ganho numérico esperado da deflação in-place em `f32`.
+- **SEMP é conservador e otimiza a coisa certa**: em snls80 ele seleciona só 2 termos e atinge gap MPO/OSA de **1.2×** (contra 4.4× do FROLS/MGS) — seu free-run é muito mais fiel à própria predição, que é o objetivo do método. O preço é o RMSE absoluto pior (o `tol=1e-3` corta cedo, subajustando). O comportamento é regulável por `tol`/`top_k`/`max_terms`.
+
+### Experimento 9 — Refino de θ por minimização do erro de simulação (Nelder-Mead)
+
+Os métodos acima estimam `θ` por mínimos quadrados (erro de 1 passo). Esse experimento adiciona um passo **opcional**: partindo do modelo FROLS, **refina os coeficientes minimizando o MSSE de free-run** via um otimizador Nelder-Mead próprio (`refine.rs`, sem dependências). É a ideia central do SEMP "literal" — otimizar `θ` para o erro de simulação — aplicada como pós-processamento.
+
+| Dataset | MPO (LS) | MPO (refino) | Δ | tempo refino |
+|---|---:|---:|---:|---:|
+| ballbeam | 0.1172 | **0.0707** | −40% | 50 ms |
+| wienerhammer | 0.2388 | 0.2390 | ~0% | 626 ms |
+| snls80 | 0.00721 | **0.00478** | −34% | 14.3 s |
+| schroeder80 | 0.01179 | **0.00881** | −25% | 8.4 s |
+
+- O refino **reduz o erro de free-run** em 25–40% nos datasets bem-condicionados (piora levemente o OSA — trade-off esperado de otimizar simulação em vez de 1 passo). W-H não muda (estrutura inacessível).
+- **O custo agora é real**: snls80 leva 14,3 s (15 parâmetros × ~91k amostras × centenas de avaliações de free-run), contra microssegundos do LS fechado. Esse é o primeiro indício concreto do custo da minimização não-linear do erro de simulação.
+
+### Experimento 10 — Réplica fiel do notebook Python (SEMP com L-BFGS)
+
+Para comparar de forma justa com um notebook Python de referência (que implementa FROLS/MGS/SEMP), foi feita uma **réplica fiel em Rust** no binário `notebook`. Diferente do nosso SEMP (que estima `θ` por LS), o SEMP do notebook usa `scipy.optimize.minimize` com **L-BFGS-B** para minimizar a **soma** dos quadrados do erro de simulação livre, num loop **otimizar → podar** partindo do FROLS. A réplica reproduz fielmente:
+
+- normalização z-score (estatísticas só do treino), split 60/40, subset de 8000 amostras (Silverbox/W-H);
+- dicionário polinomial **com termo constante** (`combinations_with_replacement`, grau 0..d);
+- parâmetros por dataset (ballbeam `(2,2,2)`, `err_thr=0.999`; silverbox `(2,2,3)` e W-H `(3,3,3)`, `err_thr=0.9999`; `prune_tol=0.05`);
+- SEMP: **L-BFGS** (crate [`argmin`](https://crates.io/crates/argmin) + More-Thuente line search) com gradiente por diferenças finitas ([`finitediff`](https://crates.io/crates/finitediff)), em `f64` como o scipy; `sim_loss` = SSE de free-run com saturação `clip=1e4`.
+
+Métricas de **simulação livre** (NRMSE = RMSE/std), treino e validação:
+
+| Dataset | Método | nº termos | NRMSE treino | NRMSE val | R² val | tempo SEMP |
+|---|---|---:|---:|---:|---:|---:|
+| Ball & Beam | FROLS/MGS | 12 | 8340 *(diverge)* | 1.60 | <0 | — |
+| | SEMP | 11 | 0.554 | 7848 *(diverge)* | <0 | 0.68 s |
+| Silverbox | FROLS/MGS | 15 | 0.073 | 0.074 | 0.9946 | — |
+| | **SEMP** | **4** | **0.032** | **0.028** | **0.9992** | **96.6 s** |
+| Wiener-Ham. | FROLS/MGS | 15 | 0.074 | 314 *(diverge)* | <0 | — |
+| | SEMP | 14 | 0.075 | 314 *(diverge)* | <0 | 10.2 s |
+
+Descobertas:
+
+- **Silverbox é a vitrine do SEMP**: parte de 15 termos (FROLS) e **poda para 4**, melhorando o R² de validação de 0.9946 → **0.9992** — modelo muito mais simples *e* robusto. É exatamente o ganho que o método promete.
+- **O custo é o esperado da otimização não-linear**: Silverbox-SEMP leva **96,6 s** (loop otimizar→podar com uma reotimização L-BFGS completa por candidato à poda). Confirma, de forma concreta, por que esse estilo de SEMP é ordens de grandeza mais caro que seleção por LS — e por que o notebook subamostra para 8000.
+- **Ball & Beam e W-H divergem em free-run na validação**: NARX polinomial de ordem alta é numericamente instável em simulação livre nesses casos; partindo de uma estrutura FROLS já divergente, podar 1–2 termos não estabiliza.
+
+**Fidelidade.** Ficaram 1:1 com o notebook: normalização, split, subset, dicionário com constante, parâmetros por dataset, e a mecânica do SEMP (objetivo SSE de free-run, loop otimizar→podar com `prune_tol`, otimização final). Diferenças residuais inevitáveis: o L-BFGS do `argmin` + More-Thuente vs. o L-BFGS-B (Fortran) do scipy podem cair em mínimos locais distintos do objetivo não-convexo; a seleção FROLS/MGS reusa a biblioteca em `f32` (só a seleção — o `θ` inicial é recalculado em `f64`); e detalhes de passo do gradiente/tolerâncias diferem.
+
 ## Como executar
 
 ```bash
-cargo run --release        # roda os 4 datasets com a configuração atual
-cargo test                 # roda os testes unitários
+cargo run --release               # binário `narmax`: compara FROLS/MGS/SEMP (NARX) nos 4 datasets
+cargo run --release --bin notebook # réplica fiel do notebook Python (FROLS/MGS/SEMP com L-BFGS)
+cargo test                        # testes unitários (lib + binário notebook)
 ```
 
-A configuração (`y_len`, `u_len`, `non_lin_len`, `ρ`, `l_max`) é fixada nas chamadas a `build_regressors` e `Frols::new` em `main.rs`.
+O binário `narmax` (`main.rs`) fixa a configuração (`ny`, `nu`, `non_lin_len`, `ρ`, `l_max`) nas chamadas a `build_regressors`, `Frols::new`, `Mgs::new` e `Semp::new`. O binário `notebook` (`src/bin/notebook.rs`) traz a configuração por dataset numa tabela `DatasetCfg`. Dependências: `nalgebra` (álgebra linear) e `argmin`/`argmin-math`/`finitediff` (otimização L-BFGS da réplica).
 
 ## Limitações conhecidas
 
-- **Construção do modelo é apenas polinomial NARMAX**: não inclui termos de ruído MA (a parte "MA" do NARMAX está ausente). Para incluí-los seria preciso iterar o FROLS com resíduos como entradas adicionais (procedimento *extended least squares*).
-- **Sem validação out-of-sample**: o ERR reportado é medido na mesma série usada para identificar. Os datasets têm porções de treino/teste recomendadas na literatura que ainda não foram exploradas.
-- **Sem regularização**: termos com coeficiente grande em ERR baixo podem indicar overfitting localizado (ver discussão do `+11.09` acima).
-- **Faltam métricas de validação** (RMSE, *one-step-ahead* vs *free-run* simulation).
+- **Pipeline padrão (`main.rs`) é NARX puro**: os termos de ruído MA foram implementados no Experimento 7 (ELS-FROLS) mas **removidos** depois, para focar a comparação entre algoritmos de seleção (Exp 8). O histórico de MA segue documentado no Experimento 7.
+- **Sem regularização**: termos com coeficiente grande em ERR baixo podem indicar overfitting localizado (ver discussão do `+11.09` acima). O SEMP/refino por erro de simulação ataca isso indiretamente via poda.
+- **`f32` na seleção**: FROLS/MGS/SEMP da biblioteca operam em `f32`. A réplica do notebook (Exp 10) faz a otimização L-BFGS em `f64`, mas reusa a seleção FROLS/MGS em `f32`.
+- **Otimização não-linear é cara**: o refino por erro de simulação (Exp 9) e o SEMP-L-BFGS (Exp 10) custam segundos a ~1.5 min por dataset — ordens de grandeza acima da seleção por LS.
+- **Comparação direta com o notebook Python não foi fechada**: exigiria rodar o notebook original (com os `.dat`/CSVs no layout dele e ambiente Python/scipy) para confrontar os números lado a lado.
