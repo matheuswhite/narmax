@@ -1,6 +1,9 @@
-use crate::{narmax_method::NarmaxMethod, narmax_model::NarmaxModel, regressor::Regressor};
+use crate::{
+    narmax_method::{NarmaxMethod, common},
+    narmax_model::NarmaxModel,
+    regressor::Regressor,
+};
 use nalgebra::{DMatrix, DVector};
-use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub struct Frols {
@@ -11,51 +14,6 @@ pub struct Frols {
 impl Frols {
     pub fn new(rho: f32, l_max: usize) -> Self {
         Self { rho, l_max }
-    }
-
-    fn build_initial_phi(regressors: &[Regressor], y: &[f32], u: &[f32]) -> DMatrix<f32> {
-        let mut k_min = 0;
-        for r in regressors {
-            for s in r.terms() {
-                if s.index() > k_min {
-                    k_min = s.index();
-                }
-            }
-        }
-
-        let samples = HashMap::from([("y", y), ("u", u)]);
-
-        let n = y.len() - k_min;
-        let m = regressors.len();
-
-        DMatrix::from_fn(n, m, |i, j| {
-            regressors[j].eval_at(k_min + i, &samples).unwrap()
-        })
-    }
-
-    fn build_initial_phi_with_error(
-        regressors: &[Regressor],
-        y: &[f32],
-        u: &[f32],
-        e: &[f32],
-    ) -> DMatrix<f32> {
-        let mut k_min = 0;
-        for r in regressors {
-            for s in r.terms() {
-                if s.index() > k_min {
-                    k_min = s.index();
-                }
-            }
-        }
-
-        let samples = HashMap::from([("y", y), ("u", u), ("e", e)]);
-
-        let n = y.len() - k_min;
-        let m = regressors.len();
-
-        DMatrix::from_fn(n, m, |i, j| {
-            regressors[j].eval_at(k_min + i, &samples).unwrap()
-        })
     }
 
     fn core_identify(
@@ -160,14 +118,7 @@ impl Frols {
         }
 
         /* Recover Theta from original space */
-        let mut theta = DVector::zeros(current_l);
-        for i in (0..current_l).rev() {
-            let mut sum = 0.0;
-            for k in (i + 1)..current_l {
-                sum += a[(i, k)] * theta[k];
-            }
-            theta[i] = g[i] - sum;
-        }
+        let theta = common::recover_theta(&a, &g, current_l);
 
         /* Build and return model */
         let mut selected_regressors = vec![];
@@ -187,18 +138,7 @@ impl Frols {
 
 impl NarmaxMethod for Frols {
     fn identify(self, regressors: Vec<Regressor>, y: &[f32], u: &[f32]) -> NarmaxModel {
-        let phi = Self::build_initial_phi(&regressors, y, u);
-        self.core_identify(regressors, y, phi)
-    }
-
-    fn identify_with_error(
-        self,
-        regressors: Vec<Regressor>,
-        y: &[f32],
-        u: &[f32],
-        e: &[f32],
-    ) -> NarmaxModel {
-        let phi = Self::build_initial_phi_with_error(&regressors, y, u, e);
+        let phi = common::build_initial_phi(&regressors, y, u);
         self.core_identify(regressors, y, phi)
     }
 }

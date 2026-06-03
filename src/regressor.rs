@@ -72,6 +72,10 @@ impl PartialEq for Regressor {
 
 impl Display for Regressor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.terms.is_empty() {
+            return write!(f, "1"); // constant / bias term
+        }
+
         let terms_with_powers: Vec<String> = self
             .terms
             .iter()
@@ -124,10 +128,43 @@ impl Mul for Regressor {
     }
 }
 
+/// Build the candidate set: all monomials of total degree `1..=non_lin_len` over the
+/// atoms `y(k-1)..y(k-ny)`, `u(k-1)..u(k-nu)` (and any other names in `atoms`),
+/// deduplicated by order-insensitive equality.
+pub fn build_regressors(atoms: HashMap<&str, usize>, non_lin_len: usize) -> Vec<Regressor> {
+    let mut base = vec![];
+
+    for (name, max_lag) in atoms {
+        for i in 1..=max_lag {
+            base.push(Regressor::new(name, i));
+        }
+    }
+
+    let mut all_terms = base.clone();
+    let mut last_layer = base.clone();
+
+    for _ in 2..=non_lin_len {
+        let mut new_layer = vec![];
+
+        for a in &base {
+            for b in &last_layer {
+                let prod = a * b;
+                if !all_terms.contains(&prod) && !new_layer.contains(&prod) {
+                    new_layer.push(prod);
+                }
+            }
+        }
+
+        all_terms.extend(new_layer.clone());
+        last_layer = new_layer;
+    }
+
+    all_terms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_regressors;
 
     fn assert_same_regressor_set(left: &[Regressor], right: &[Regressor]) {
         assert_eq!(

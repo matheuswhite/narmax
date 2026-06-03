@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+argmin = "0.11.0"
+argmin-math = "0.5.1"
+finitediff = "0.2.0"
 nalgebra = "0.34.2"
